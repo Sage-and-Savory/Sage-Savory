@@ -1,0 +1,229 @@
+import express from "express";
+import cors from "cors";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { GoogleGenAI, Type } from "@google/genai";
+import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
+
+dotenv.config();
+
+const supabaseAdmin = createClient(
+  process.env.VITE_SUPABASE_URL || "", 
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ""
+);
+
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    }
+  }
+});
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(cors());
+  app.use(express.json({ limit: "50mb" }));
+
+  // API routes FIRST
+  app.post("/api/generate-recipe", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        res.status(401).json({ error: 'Missing or invalid authorization header' });
+        return;
+      }
+
+      const token = authHeader.split(' ')[1];
+      const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
+
+      if (authError || !user) {
+        res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
+        return;
+      }
+
+      const { text, imageBase64, imageMimeType, language } = req.body;
+
+      const langMap: Record<string, string> = {
+        'en': 'English',
+        'es': 'Spanish',
+        'fr': 'French',
+        'de': 'German',
+        'it': 'Italian',
+        'pt': 'Portuguese',
+        'zh': 'Chinese',
+        'ja': 'Japanese',
+        'ko': 'Korean',
+        'ru': 'Russian',
+        'hi': 'Hindi',
+        'bn': 'Bengali',
+        'ta': 'Tamil',
+        'ml': 'Malayalam'
+      };
+      
+      const langName = language && langMap[language] ? langMap[language] : 'English';
+      const langInstruction = `CRITICAL: You MUST write the title, ingredients names, notes, steps, and pickyHack ENTIRELY in ${langName}. Do not use English unless the user requested English.`;
+
+      let hasInputForAnalysis = false;
+
+      const parts: any[] = [];
+      if (imageBase64) {
+        parts.push({
+          inlineData: {
+            mimeType: imageMimeType || "image/jpeg",
+            data: imageBase64,
+          },
+        });
+        parts.push({
+          text: `Analyze this image and identify the food ingredients present. Then, create a magical, delicious recipe based on those ingredients (plus standard pantry staples). Provide the recipe details matching the requested schema. ${langInstruction}`
+        });
+        hasInputForAnalysis = true;
+      } else if (text) {
+        parts.push({
+          text: `Create a magical, delicious recipe using the following ingredients: ${text}. You can include standard pantry staples. Provide the recipe details matching the requested schema. ${langInstruction}`
+        });
+        hasInputForAnalysis = true;
+      }
+
+      if (!hasInputForAnalysis) {
+        return res.status(400).json({ error: "Please provide ingredients text or an image." });
+      }
+
+      const config = {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            isValid: {
+              type: Type.BOOLEAN,
+              description: "True if the input primarily consists of common, recognizable, edible food ingredients. False if it contains nonsense, non-food items, harmful substances, or unrecognizable input."
+            },
+            errorMessage: {
+              type: Type.STRING,
+              description: "If isValid is false, explain why the ingredients are not recognized or invalid."
+            },
+            title: { type: Type.STRING, description: "Title of the recipe" },
+            time: { type: Type.STRING, description: "Time to make, e.g. '30 min'" },
+            difficulty: { type: Type.STRING, description: "Easy, Medium, or Hard" },
+            baseServings: { type: Type.NUMBER, description: "Number of servings" },
+            region: { type: Type.STRING, description: "The regional cuisine category, e.g., Italian, Mexican, Asian, Indian, American, etc. Use 'Global' if unknown." },
+            ingredients: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  amount: { type: Type.NUMBER, description: "Numeric amount" },
+                  unit: { type: Type.STRING, description: "Unit of measure, e.g. cups, tbsp, or 'to taste'" },
+                  name: { type: Type.STRING, description: "Ingredient name" },
+                  category: { type: Type.STRING, description: "One of: Produce, Meat, Dairy, Pantry, Main, Other" },
+                  notes: { type: Type.STRING, description: "Any helpful extra details, e.g. 'about 4 large potatoes' or 'finely chopped'" }
+                },
+                required: ["amount", "unit", "name", "category"]
+              }
+            },
+            steps: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: "Step by step instructions"
+            },
+            pickyHack: {
+              type: Type.STRING,
+              description: "A fun tip trick for serving to picky eaters kids"
+            }
+          },
+          required: ["isValid"]
+        }
+      };
+
+      const tryModel = async (modelName: string, retries = 1) => {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: { parts },
+            config
+          });
+          return JSON.parse(response.text || "{}");
+        } catch (e: any) {
+          if (retries > 0 && (e.status === 429 || (e.message && e.message.includes('429')))) {
+            console.log("Rate limit hit, waiting 60s before retrying...");
+            await new Promise(resolve => setTimeout(resolve, 60000));
+            return await tryModel(modelName, retries - 1);
+          }
+          throw e;
+        }
+      };
+
+      let recipeData = await tryModel("gemini-3.5-flash");
+
+      if (!recipeData.isValid) {
+        return res.status(400).json({ error: recipeData.errorMessage || "Hmm, we don't recognize those ingredients. Try common food items!" });
+      }
+
+      let imageResult = undefined;
+      let generatedImageUrl = undefined;
+      
+      if (imageBase64 && imageMimeType) {
+        recipeData.image = `data:${imageMimeType};base64,${imageBase64}`;
+      } else {
+        recipeData.image = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=800';
+        if (process.env.PEXELS_API_KEY) {
+          try {
+            const pexelsQuery = encodeURIComponent(`${recipeData.title} food`);
+            const pexelsRes = await fetch(`https://api.pexels.com/v1/search?query=${pexelsQuery}&per_page=1`, {
+              headers: { Authorization: process.env.PEXELS_API_KEY }
+            });
+            if (pexelsRes.ok) {
+              const pexelsData = await pexelsRes.json();
+              if (pexelsData.photos && pexelsData.photos.length > 0) {
+                recipeData.image = pexelsData.photos[0].src.large2x;
+              }
+            } else {
+              console.error("Pexels API error:", pexelsRes.status, await pexelsRes.text());
+            }
+          } catch (pexelsErr: any) {
+            console.error("Failed to fetch image from Pexels:", pexelsErr);
+          }
+        }
+      }
+
+      res.json(recipeData);
+
+    } catch (e: any) {
+      console.error(e);
+      if (e.status === 503 || e.message?.includes('high demand') || e.message?.includes('UNAVAILABLE')) {
+        res.status(503).json({ error: "The AI model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later." });
+      } else {
+        res.status(500).json({ error: e.message || "Failed to generate recipe. Please try again." });
+      }
+    }
+  });
+
+
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    // Catch-all route 
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();

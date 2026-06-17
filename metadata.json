@@ -1,0 +1,6 @@
+{
+  "name": "Sage & Savory",
+  "description": "Meal planning app with a magical recipe generator and picky eater plating hacks.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
