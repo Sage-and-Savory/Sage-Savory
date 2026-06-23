@@ -1,0 +1,10 @@
+{
+  "devCommand": "npm run dev",
+  "framework": "vite",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

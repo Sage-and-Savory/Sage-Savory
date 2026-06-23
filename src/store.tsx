@@ -116,7 +116,12 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 export function AppProvider({ children }: { children: ReactNode }) {
 
   const [userState, setUserState] = useState<UserState>({ isPremium: false, language: 'en', theme: 'light' });
-  const [recipes, setRecipes] = useState<Recipe[]>(INITIAL_RECIPES);
+  const [recipes, setRecipes] = useState<Recipe[]>(
+    INITIAL_RECIPES.filter(r => 
+      !r.title.toLowerCase().includes('beef') && 
+      !r.ingredients.some(i => i.name.toLowerCase().includes('beef'))
+    )
+  );
   const [mealPlan, setMealPlan] = useState<MealPlan>(INITIAL_MEAL_PLAN);
   const [groceryList, setGroceryList] = useState<GroceryItem[]>([]);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
@@ -287,16 +292,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
                    // Map DB snake_case columns back to the Recipe type, handling the image_url alias
                    const mappedRecipes = recipesData.map(r => ({
                       ...r,
+                      id: r.id.startsWith(`${session.user.id}_`) ? r.id.replace(`${session.user.id}_`, '') : r.id,
                       image: r.image_url || r.image,
                       baseServings: r.base_servings || r.baseServings,
                       pickyHack: r.picky_hack || r.pickyHack,
                       kid_plating_hack: r.kid_plating_hack || r.kid_plating_hack,
                       detailedSteps: r.detailed_steps || r.detailedSteps,
                       isPlanB: r.is_plan_b || r.isPlanB
-                   }));
+                   })).filter((r: any) => 
+                     !r.title?.toLowerCase().includes('beef') && 
+                     !r.ingredients?.some((i: any) => i.name?.toLowerCase().includes('beef'))
+                   );
                    setRecipes(mappedRecipes);
                 } else if (data.recipes) {
-                   setRecipes(data.recipes);
+                   setRecipes(data.recipes.filter((r: any) => 
+                     !r.title?.toLowerCase().includes('beef') && 
+                     !r.ingredients?.some((i: any) => i.name?.toLowerCase().includes('beef'))
+                   ));
                 }
 
                 if (data.meal_plan) setMealPlan(data.meal_plan);
@@ -306,7 +318,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 if (data.cooked_history) setCookedHistory(data.cooked_history);
              } else if (error && error.code === 'PGRST116') {
                 // New User Hook: Initialize 2 starter recipes per regional cuisine
-                const starterRecipes = INITIAL_RECIPES.reduce((acc, recipe) => {
+                const starterRecipes = INITIAL_RECIPES.filter(r => 
+                  !r.title.toLowerCase().includes('beef') && 
+                  !r.ingredients.some(i => i.name.toLowerCase().includes('beef'))
+                ).reduce((acc, recipe) => {
                   const countInReg = acc.filter(r => r.region === (recipe as any).region).length;
                   if (countInReg < 2) {
                     acc.push(recipe);
@@ -458,23 +473,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
         // Save recipes to dedicated table
         if (safeRecipes.length > 0) {
-          const mappedRecipes = safeRecipes.map(r => ({
-            id: r.id,
-            user_id: session.user.id,
-            title: r.title,
-            image_url: r.image, // User requested image_url
-            time: r.time,
-            difficulty: r.difficulty,
-            base_servings: r.baseServings,
-            region: r.region,
-            ingredients: r.ingredients,
-            steps: r.steps,
-            detailed_steps: r.detailedSteps,
-            instructions: r.instructions,
-            picky_hack: r.pickyHack,
-            kid_plating_hack: r.kid_plating_hack || r.kid_plating_hack,
-            is_plan_b: r.isPlanB
-          }));
+          const mappedRecipes = safeRecipes.map(r => {
+            const isInitial = INITIAL_RECIPES.some(ir => ir.id === r.id);
+            const dbId = isInitial ? `${session.user.id}_${r.id}` : r.id;
+            return {
+              id: dbId,
+              user_id: session.user.id,
+              title: r.title,
+              image_url: r.image, // User requested image_url
+              time: r.time,
+              difficulty: r.difficulty,
+              base_servings: r.baseServings,
+              region: r.region,
+              ingredients: r.ingredients,
+              steps: r.steps,
+              detailed_steps: r.detailedSteps,
+              instructions: r.instructions,
+              picky_hack: r.pickyHack,
+              kid_plating_hack: r.kid_plating_hack || r.kid_plating_hack,
+              is_plan_b: r.isPlanB
+            };
+          });
           
           try {
             const { error } = await supabase.from('recipes').upsert(mappedRecipes, { onConflict: 'id' });

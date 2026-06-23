@@ -9,10 +9,16 @@ import crypto from "crypto";
 
 dotenv.config();
 
-const supabaseAdmin = createClient(
-  process.env.VITE_SUPABASE_URL || "", 
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ""
-);
+let supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://zmgtllzebsgfolgytznp.supabase.co";
+supabaseUrl = supabaseUrl.trim().replace(/\/+$/, '');
+if (supabaseUrl.endsWith('/rest/v1')) {
+  supabaseUrl = supabaseUrl.substring(0, supabaseUrl.length - 8);
+}
+supabaseUrl = supabaseUrl.replace(/\/+$/, '');
+
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InptZ3RsbHplYnNnZm9sZ3l0em5wIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA3MzA2NjIsImV4cCI6MjA5NjMwNjY2Mn0.IASgbwvZJtEYaL2qdKd7rBbNwUfFOji9ZpGYkF7_Gz4";
+
+const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -34,16 +40,33 @@ async function startServer() {
   app.post("/api/generate-recipe", async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        res.status(401).json({ error: 'Missing or invalid authorization header' });
+      const token = authHeader?.startsWith('Bearer ') 
+        ? authHeader.split(' ')[1]?.trim() 
+        : authHeader?.trim();
+        
+      if (!token) {
+        res.status(401).json({ error: 'Missing token' });
         return;
       }
 
-      const token = authHeader.split(' ')[1];
-      const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
+      let user = null;
+      let errorMessage = 'No user found';
+      
+      try {
+        const { data, error: authError } = await supabaseAdmin.auth.getUser(token);
+        if (authError) {
+          console.error("Supabase getUser error:", authError);
+          errorMessage = authError.message || JSON.stringify(authError);
+        } else {
+          user = data?.user;
+        }
+      } catch (err: any) {
+        console.error("Caught error during Supabase getUser:", err);
+        errorMessage = err.message || JSON.stringify(err);
+      }
 
-      if (authError || !user) {
-        res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
+      if (!user) {
+        res.status(401).json({ error: `Unauthorized: Invalid or expired token. Details: ${errorMessage}` });
         return;
       }
 
@@ -67,7 +90,9 @@ async function startServer() {
       };
       
       const langName = language && langMap[language] ? langMap[language] : 'English';
-      const langInstruction = `CRITICAL: You MUST write the title, ingredients names, notes, steps, and pickyHack ENTIRELY in ${langName}. Do not use English unless the user requested English.`;
+      const langInstruction = `CRITICAL: You MUST write the title, ingredients names, notes, steps, and pickyHack ENTIRELY in ${langName}. Do not use English unless the user requested English.
+
+EXTREMELY STRICT DIETARY RULE: You MUST NEVER generate a recipe containing beef, beef broth, or any beef products. If the user explicitly requests beef, provides beef as an input, or the image contains beef, you MUST set isValid to false and provide an errorMessage stating that beef recipes are not supported on this platform.`;
 
       let hasInputForAnalysis = false;
 
@@ -158,7 +183,7 @@ async function startServer() {
         }
       };
 
-      let recipeData = await tryModel("gemini-3.5-flash");
+      let recipeData = await tryModel("gemini-2.5-flash");
 
       if (!recipeData.isValid) {
         return res.status(400).json({ error: recipeData.errorMessage || "Hmm, we don't recognize those ingredients. Try common food items!" });

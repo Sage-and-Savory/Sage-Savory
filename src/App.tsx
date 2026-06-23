@@ -5,6 +5,7 @@ import { Home, Sparkles, ShoppingBag, Settings, Plus, Minus, Lock, Camera, X, Cl
 import { useAppStore, Recipe, convertAmountAndUnit } from './store';
 import { Onboarding } from './Onboarding';
 import { useTranslation } from './i18n';
+import { supabase } from './supabaseClient';
 
 // Helper to resolve detailed steps
 function resolveStepDetails(stepObj: any, recipe: any, servings: number, isMetric: boolean) {
@@ -181,7 +182,7 @@ function NavItem({ icon, label, isActive, onClick }: { icon: React.ReactNode, la
 // --- VIEWS ---
 
 function HomeView({ onSelectRecipe, onViewHistory }: { onSelectRecipe: (r: Recipe) => void, onViewHistory: () => void }) {
-  const { mealPlan, recipes, addMealToDay, removeMealFromDay, swapToPlanB, cookedHistory, userState, session } = useAppStore();
+  const { mealPlan, recipes, addMealToDay, removeMealFromDay, swapToPlanB, cookedHistory, userState, session, showPaywall, setShowPaywall } = useAppStore();
   const { t } = useTranslation(userState.language);
   const [showPickerForDay, setShowPickerForDay] = useState<string | null>(null);
   const [showDayPickerForRecipe, setShowDayPickerForRecipe] = useState<Recipe | null>(null);
@@ -202,11 +203,20 @@ function HomeView({ onSelectRecipe, onViewHistory }: { onSelectRecipe: (r: Recip
     }
     setShowDayPickerForRecipe(recipe);
   };
+
+  const getLocalDateStr = (d: Date) => {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
   const todayDate = new Date();
   const todayDayName = todayDate.toLocaleDateString('en-US', { weekday: 'long' });
   const realToday = DAY_NAMES.includes(todayDayName) ? todayDayName : 'Monday';
+  const realTodayDateKey = getLocalDateStr(todayDate);
 
-  const [selectedDay, setSelectedDay] = useState<string>(realToday);
+  const [selectedDay, setSelectedDay] = useState<string>(realTodayDateKey);
 
   // Dynamically compute WEEK_DAYS based on the current week
   const currentDayIndex = todayDate.getDay(); // Sunday is 0, Monday is 1...
@@ -223,24 +233,30 @@ function HomeView({ onSelectRecipe, onViewHistory }: { onSelectRecipe: (r: Recip
     else if (dateNum % 10 === 2 && dateNum !== 12) ordinal = 'nd';
     else if (dateNum % 10 === 3 && dateNum !== 13) ordinal = 'rd';
 
+    const dateKey = getLocalDateStr(d);
+
     return {
       dayShort: DAY_SHORTS[ix],
       dayName: day,
+      dateKey,
       date: dateNum + ordinal,
-      recipes: (mealPlan[day] || []).map(id => recipes.find(r => r.id === id)).filter(Boolean) as Recipe[],
+      recipes: (mealPlan[dateKey] || []).map(id => recipes.find(r => r.id === id)).filter(Boolean) as Recipe[],
     };
   });
 
-  const todayRecipeId = (mealPlan[realToday] && mealPlan[realToday].length > 0) ? mealPlan[realToday][0] : null;
+  const todayRecipeId = (mealPlan[realTodayDateKey] && mealPlan[realTodayDateKey].length > 0) ? mealPlan[realTodayDateKey][0] : null;
   const tonightRecipe = recipes.find(r => r.id === todayRecipeId) || recipes[0];
-
-  const cookedRecipes = (cookedHistory || []).slice(0, 10).map(id => recipes.find(r => r.id === id)).filter(Boolean) as Recipe[];
 
   const handlePlanBSwap = (e: React.MouseEvent, dayName: string, index?: number) => {
     e.stopPropagation();
     
     if (!session) {
       alert("Please sign in or create an account to plan your meals.");
+      return;
+    }
+
+    if (!userState.isPremium) {
+      setShowPaywall(true);
       return;
     }
 
@@ -278,12 +294,12 @@ function HomeView({ onSelectRecipe, onViewHistory }: { onSelectRecipe: (r: Recip
         {/* Calendar Grid */}
         <div className="grid grid-cols-7 gap-1 md:gap-2 mb-6">
           {WEEK_DAYS.map((day, i) => {
-            const isSelected = selectedDay === day.dayName;
+            const isSelected = selectedDay === day.dateKey;
             const hasMeals = day.recipes.length > 0;
             return (
               <button 
                 key={i}
-                onClick={() => setSelectedDay(day.dayName)}
+                onClick={() => setSelectedDay(day.dateKey)}
                 className={`flex flex-col items-center justify-center p-2 md:p-3 rounded-full transition-all duration-300 ${
                   isSelected 
                     ? 'bg-[#0D9488] text-white shadow-lg scale-105 md:scale-110 z-10' 
@@ -309,7 +325,7 @@ function HomeView({ onSelectRecipe, onViewHistory }: { onSelectRecipe: (r: Recip
         {/* Selected Day Details */}
         <div className="mt-2 min-h-[160px] animate-in fade-in slide-in-from-right-4 duration-300">
           {(() => {
-            const dayObj = WEEK_DAYS.find(d => d.dayName === selectedDay);
+            const dayObj = WEEK_DAYS.find(d => d.dateKey === selectedDay);
             if (!dayObj) return null;
             const isAnimating = animatingDay === selectedDay;
             
@@ -403,40 +419,6 @@ function HomeView({ onSelectRecipe, onViewHistory }: { onSelectRecipe: (r: Recip
         </div>
       </section>
 
-      {/* History Section - Horizontal */}
-      {cookedRecipes.length > 0 && (
-        <section className="px-6 mb-12">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-bold text-[#333333] dark:text-[#E5E5EA]">Recently Cooked</h3>
-            <span className="text-xs font-medium text-gray-400 uppercase tracking-widest cursor-pointer hover:text-[#0D9488]" onClick={onViewHistory}>View All</span>
-          </div>
-          <div className="flex overflow-x-auto gap-4 pb-4 snap-x hide-scrollbar -mx-6 px-6">
-            {cookedRecipes.map(recipe => (
-              <div 
-                key={recipe.id} 
-                className="w-40 flex-none snap-start bg-white dark:bg-white/5 backdrop-blur-md shadow-sm hover:shadow-md transition-shadow rounded-3xl overflow-hidden cursor-pointer border border-gray-200 dark:border-white/10"
-                onClick={() => onSelectRecipe(recipe)}
-              >
-                <div className="h-28 w-full relative">
-                  <img src={recipe.image} alt={recipe.title} className="w-full h-full object-cover" />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent"></div>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); handleAddRecipeToDay(recipe); }}
-                    className="absolute top-2 right-2 bg-white/90 dark:bg-black/80 backdrop-blur-md rounded-full w-7 h-7 flex items-center justify-center shadow-sm hover:scale-110 transition-transform"
-                    title="Add again"
-                  >
-                    <Plus className="w-3.5 h-3.5 text-[#0D9488]" />
-                  </button>
-                </div>
-                <div className="p-3">
-                  <h4 className="font-bold text-[#333333] dark:text-[#E5E5EA] text-xs leading-snug line-clamp-2">{recipe.title}</h4>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
       {/* Recipe Picker Modal */}
       {showPickerForDay && (
         <div className="fixed inset-0 z-[60] flex justify-center bg-[#333333]/40 backdrop-blur-sm animate-in fade-in duration-200">
@@ -477,13 +459,14 @@ function HomeView({ onSelectRecipe, onViewHistory }: { onSelectRecipe: (r: Recip
             </button>
             <h2 className="text-xl font-bold text-[#333333] dark:text-[#E5E5EA] mb-6">When do you want to cook {showDayPickerForRecipe.title}?</h2>
             <div className="space-y-3 pb-32">
-              {DAY_NAMES.map(day => (
+              {WEEK_DAYS.map(day => (
                 <button 
-                  key={day} 
-                  onClick={() => { addMealToDay(day, showDayPickerForRecipe.id); setShowDayPickerForRecipe(null); }} 
-                  className="w-full text-left font-bold px-6 py-4 bg-white dark:bg-white/5 backdrop-blur-md rounded-3xl shadow-sm dark:border-white/10 hover:shadow-md transition-shadow text-[#333333] dark:text-[#E5E5EA]"
+                  key={day.dateKey} 
+                  onClick={() => { addMealToDay(day.dateKey, showDayPickerForRecipe.id); setShowDayPickerForRecipe(null); }} 
+                  className="w-full justify-between flex font-bold px-6 py-4 bg-white dark:bg-white/5 backdrop-blur-md rounded-3xl shadow-sm dark:border-white/10 hover:shadow-md transition-shadow text-[#333333] dark:text-[#E5E5EA]"
                 >
-                  {day}
+                  <span>{day.dayName}</span>
+                  <span className="text-sm font-medium text-gray-400">{day.dateKey}</span>
                 </button>
               ))}
             </div>
@@ -548,12 +531,17 @@ function DiscoverView({ onSelectRecipe }: { onSelectRecipe: (r: Recipe) => void 
     setInputError(null);
 
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (session?.access_token) {
-        headers['Authorization'] = `Bearer ${session.access_token}`;
+        headers['Authorization'] = `Bearer ${session?.access_token}`;
       }
 
-      const response = await fetch('/api/generate-recipe', {
+      console.log("Sending Token:", session?.access_token);
+
+      const baseUrl = import.meta.env.VITE_API_BASE_URL || '';
+      const response = await fetch(`${baseUrl}/api/generate-recipe`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ 
@@ -570,9 +558,9 @@ function DiscoverView({ onSelectRecipe }: { onSelectRecipe: (r: Recipe) => void 
       }
 
       const generatedData = await response.json();
-
+      
       const newRecipe: Recipe = {
-         id: Date.now().toString(),
+         id: 'gen_' + Date.now().toString() + '_' + Math.random().toString(36).substring(2, 10),
          ...generatedData
       };
 
