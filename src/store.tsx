@@ -246,53 +246,39 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Load from Supabase on session change, else fallback to local storage
   useEffect(() => {
     let active = true;
+    let authSubscription: any = null;
 
-    const setupAuthAndLoadData = async () => {
-      // 1. Init Auth Session
-      if (supabase) {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (active) setSession(session);
-
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-          if (active) setSession(session);
-        });
-
-        // 2. Fetch User Cloud State if logged in
-        if (session?.user?.id) {
+    const loadData = async (currentSession: any) => {
+        if (currentSession?.user?.id) {
            try {
              const { data, error } = await supabase
                 .from('user_cloud_state')
                 .select('*')
-                .eq('user_id', session.user.id)
+                .eq('user_id', currentSession.user.id)
                 .single();
                 
-             // Fetch user_usage from supabase
              const { data: usageData, error: usageError } = await supabase
                 .from('user_usage')
                 .select('*')
-                .eq('id', session.user.id)
+                .eq('id', currentSession.user.id)
                 .single();
 
-             // Fetch recipes from dedicated table
              const { data: recipesData, error: recipesError } = await supabase
                 .from('recipes')
                 .select('*')
-                .eq('user_id', session.user.id)
+                .eq('user_id', currentSession.user.id)
                 .order('created_at', { ascending: false })
                 .limit(50);
 
              if (!error && data) {
-                if (data.user_state) {
-                   // Ensure initial load from cloud defaults to free tier until explicit user_usage tells us otherwise
+                if (data.user_state && active) {
                    setUserState({ ...data.user_state, isPremium: false });
                 }
                 
-                // If we found recipes in the new table, use them. Otherwise fallback to the old JSON blob for backwards compatibility
                 if (recipesData && recipesData.length > 0) {
-                   // Map DB snake_case columns back to the Recipe type, handling the image_url alias
                    const mappedRecipes = recipesData.map(r => ({
                       ...r,
-                      id: r.id.startsWith(`${session.user.id}_`) ? r.id.replace(`${session.user.id}_`, '') : r.id,
+                      id: r.id.startsWith(`${currentSession.user.id}_`) ? r.id.replace(`${currentSession.user.id}_`, '') : r.id,
                       image: r.image_url || r.image,
                       baseServings: r.base_servings || r.baseServings,
                       pickyHack: r.picky_hack || r.pickyHack,
@@ -303,21 +289,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
                      !r.title?.toLowerCase().includes('beef') && 
                      !r.ingredients?.some((i: any) => i.name?.toLowerCase().includes('beef'))
                    );
-                   setRecipes(mappedRecipes);
+                   if (active) setRecipes(mappedRecipes);
                 } else if (data.recipes) {
-                   setRecipes(data.recipes.filter((r: any) => 
+                   if (active) setRecipes(data.recipes.filter((r: any) => 
                      !r.title?.toLowerCase().includes('beef') && 
                      !r.ingredients?.some((i: any) => i.name?.toLowerCase().includes('beef'))
                    ));
                 }
 
-                if (data.meal_plan) setMealPlan(data.meal_plan);
-                if (data.grocery_list) setGroceryList(data.grocery_list);
-                if (data.favorites) setFavorites(new Set(data.favorites));
-                if (data.ratings) setRatings(data.ratings);
-                if (data.cooked_history) setCookedHistory(data.cooked_history);
+                if (data.meal_plan && active) setMealPlan(data.meal_plan);
+                if (data.grocery_list && active) setGroceryList(data.grocery_list);
+                if (data.favorites && active) setFavorites(new Set(data.favorites));
+                if (data.ratings && active) setRatings(data.ratings);
+                if (data.cooked_history && active) setCookedHistory(data.cooked_history);
              } else if (error && error.code === 'PGRST116') {
-                // New User Hook: Initialize 2 starter recipes per regional cuisine
                 const starterRecipes = INITIAL_RECIPES.filter(r => 
                   !r.title.toLowerCase().includes('beef') && 
                   !r.ingredients.some(i => i.name.toLowerCase().includes('beef'))
@@ -328,10 +313,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
                   }
                   return acc;
                 }, [] as any[]);
-                setRecipes(starterRecipes);
+                if (active) setRecipes(starterRecipes);
              }
 
-             // Merge usage tracker from DB
              if (usageData && active) {
                 const today = new Date().toISOString().split('T')[0];
                 setUserState(prev => ({
@@ -346,24 +330,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 }));
              }
 
-             if (active && (!error || error.code === 'PGRST116')) { // PGRST116 means no rows found
+             if (active && (!error || error.code === 'PGRST116')) {
                 setIsLoaded(true);
-                return; // Loaded from cloud
+                return;
              }
 
            } catch (err) {
              console.error("Error loading cloud state", err);
            }
         }
-      }
+        await loadFromLocalForage();
+    };
 
-      // 3. Fallback to Local Storage
-      await loadFromLocalForage();
+    const setupAuthAndLoadData = async () => {
+      if (supabase) {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (active) setSession(session);
+        await loadData(session);
+
+        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+          if (active) {
+            setSession(newSession);
+            if (!newSession) {
+               setRecipes([]);
+               setMealPlan(INITIAL_MEAL_PLAN);
+               setGroceryList([]);
+               setFavorites(new Set());
+               setRatings({});
+               setCookedHistory(['mex_2', 'ame_2', 'ita_2']);
+            }
+            await loadData(newSession);
+          }
+        });
+        authSubscription = subscription;
+      } else {
+        await loadData(null);
+      }
     };
 
     setupAuthAndLoadData();
 
-    return () => { active = false; };
+    return () => { 
+      active = false; 
+      if (authSubscription) authSubscription.unsubscribe();
+    };
   }, []);
 
   const loadFromLocalForage = async () => {
@@ -474,8 +484,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // Save recipes to dedicated table
         if (safeRecipes.length > 0) {
           const mappedRecipes = safeRecipes.map(r => {
-            const isInitial = INITIAL_RECIPES.some(ir => ir.id === r.id);
-            const dbId = isInitial ? `${session.user.id}_${r.id}` : r.id;
+            const dbId = r.id.startsWith(`${session.user.id}_`) ? r.id : `${session.user.id}_${r.id}`;
             return {
               id: dbId,
               user_id: session.user.id,

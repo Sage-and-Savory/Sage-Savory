@@ -29,15 +29,14 @@ const ai = new GoogleGenAI({
   }
 });
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+const app = express();
+const PORT = 3000;
 
-  app.use(cors());
-  app.use(express.json({ limit: "50mb" }));
+app.use(cors());
+app.use(express.json({ limit: "50mb" }));
 
-  // API routes FIRST
-  app.post("/api/generate-recipe", async (req, res) => {
+// API routes FIRST
+app.post("/api/generate-recipe", async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
       const token = authHeader?.startsWith('Bearer ') 
@@ -165,25 +164,37 @@ EXTREMELY STRICT DIETARY RULE: You MUST NEVER generate a recipe containing beef,
         }
       };
 
-      const tryModel = async (modelName: string, retries = 1) => {
-        try {
-          const response = await ai.models.generateContent({
-            model: modelName,
-            contents: { parts },
-            config
-          });
-          return JSON.parse(response.text || "{}");
-        } catch (e: any) {
-          if (retries > 0 && (e.status === 429 || (e.message && e.message.includes('429')))) {
-            console.log("Rate limit hit, waiting 60s before retrying...");
-            await new Promise(resolve => setTimeout(resolve, 60000));
-            return await tryModel(modelName, retries - 1);
+      const tryModels = async (models: string[], retries = 2): Promise<any> => {
+        for (const modelName of models) {
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: { parts },
+              config
+            });
+            return JSON.parse(response.text || "{}");
+          } catch (e: any) {
+            console.error(`Error with model ${modelName}:`, e.message || e);
+            // Check for 429 (Rate Limit) or 503 (Service Unavailable / Overloaded)
+            if (e.status === 429 || e.status === 503 || (e.message && (e.message.includes('429') || e.message.includes('503')))) {
+              console.log(`Model ${modelName} overloaded or rate limited. Trying next model...`);
+              continue; // try next model
+            }
+            throw e; // throw other errors immediately
           }
-          throw e;
         }
+        
+        // If all models failed, try the first one again after waiting if retries > 0
+        if (retries > 0) {
+           console.log("All models failed due to rate limits or overload. Waiting 5s before retrying...");
+           await new Promise(resolve => setTimeout(resolve, 5000));
+           return await tryModels(models, retries - 1);
+        }
+        
+        throw new Error("All AI models are currently experiencing high demand. Please try again later.");
       };
 
-      let recipeData = await tryModel("gemini-2.5-flash");
+      let recipeData = await tryModels(["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]);
 
       if (!recipeData.isValid) {
         return res.status(400).json({ error: recipeData.errorMessage || "Hmm, we don't recognize those ingredients. Try common food items!" });
@@ -230,6 +241,7 @@ EXTREMELY STRICT DIETARY RULE: You MUST NEVER generate a recipe containing beef,
 
 
 
+async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -251,4 +263,8 @@ EXTREMELY STRICT DIETARY RULE: You MUST NEVER generate a recipe containing beef,
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
